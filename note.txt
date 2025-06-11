@@ -1,13 +1,18 @@
-cd C:\kafka
+cd C:\App\kafka
 .\bin\windows\zookeeper-server-start.bat .\config\zookeeper.properties
 
-cd C:\kafka
+cd C:\App\kafka
 .\bin\windows\kafka-server-start.bat .\config\server.properties
 
-cd C:\kafka
+cd C:\App\kafka
 .\bin\windows\kafka-topics.bat --create --topic credit-card-transactions --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
 
 Chạy kafka trước 
 
 rồi chạy song song spark
 
+chạy hadoop
+hdfs namenode -format
+hdfs datanode -format
+start-dfs.cmd
+start-yarn.cmd
