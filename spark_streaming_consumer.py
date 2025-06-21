@@ -50,21 +50,20 @@ schema = StructType() \
     .add("Is Fraud?", StringType())
 
 # Đọc dữ liệu từ Kafka
-df = spark.readStream \
+# Đọc stream từ Kafka
+raw_df = spark.readStream \
     .format("kafka") \
     .option("kafka.bootstrap.servers", "localhost:9092") \
     .option("subscribe", "credit-card-transactions") \
     .option("startingOffsets", "earliest") \
-    .load()
-
-# Chuyển value từ bytes → JSON
-json_df = df.selectExpr("CAST(value AS STRING) as json_data") \
+    .load() \
+    .selectExpr("CAST(value AS STRING) as json_data") \
     .select(from_json(col("json_data"), schema).alias("data")) \
     .select("data.*")
 
-# Lọc ra giao dịch hợp lệ (không fraud, không lỗi)
-invalid_df1 = json_df.filter(col("Errors?").isNotNull())
-invalid_df2 = invalid_df1.filter(col("Is Fraud?") == "No")
+# Lọc transaction hợp lệ (Errors? != null và Is Fraud? == No)
+valid_df = raw_df.filter(col("Errors?").isNotNull() & (col("Is Fraud?") == "No"))
+
 
 # Định nghĩa hàm xử lý cho mỗi batch
 def process_batch(batch_df, batch_id):
@@ -95,15 +94,8 @@ def process_batch(batch_df, batch_id):
                 .format("csv") \
                 .save("hdfs://localhost:9000/processed_data/transactions")
             
+
             # Tính toán và ghi thống kê
-            # agg_batch = processed_batch \
-            #     .withWatermark("timestamp", "1 day") \
-            #     .groupBy(window(col("timestamp"), "1 day"), col("Merchant Name")) \
-            #     .agg(
-            #         count("*").alias("num_transactions"),
-            #         sum("Amount_VND").alias("total_amount_vnd")
-            #     )
-            
             agg_batch = processed_batch \
                 .withWatermark("timestamp", "1 day") \
                 .groupBy(window(col("timestamp"), "1 day"), col("Merchant Name")) \
@@ -112,19 +104,33 @@ def process_batch(batch_df, batch_id):
                     sum("Amount_VND").alias("total_amount_vnd")
                 ) \
                 .withColumn(
-                    "window_str",
-                    concat_ws(" - ",
-                        date_format(col("window.start"), "yyyy-MM-dd"),
-                        date_format(col("window.end"), "yyyy-MM-dd")
-                    )
+                    "window_start", date_format(col("window.start"), "yyyy-MM-dd"),
                 ) \
-                .drop("window")
+                .withColumn(
+                    "window_end", date_format(col("window.end"), "yyyy-MM-dd"),
+                ) \
+                .withColumn(
+                    "window_str", concat_ws(" - ", col("window_start"), col("window_end"))
+                ) \
+                .drop("window", "window_start", "window_end")
             
+            # Ghi thống kê vào HDFS
             agg_batch.write \
                 .mode("append") \
                 .option("header", "true") \
                 .format("csv") \
                 .save("hdfs://localhost:9000/processed_data/statistics")
+
+            #Ghi log fraud vào HDFS
+            # 3) Ghi nhận fraud để phân tích sau
+            fraud_batch = processed_batch.filter(col("Is Fraud?") == "Yes")
+            if fraud_batch.head(1):
+                fraud_batch.select(
+                    "User", "date", "time", "Merchant Name", "Merchant City", "amount_vnd"
+                ).write \
+                .mode("append") \
+                .option("header", "true") \
+                .csv("hdfs://localhost:9000/processed_data/log_fraud/")
             
     except Exception:
         import traceback
@@ -132,7 +138,7 @@ def process_batch(batch_df, batch_id):
         raise
 
 # Áp dụng function xử lý batch
-query = invalid_df2.writeStream \
+query = valid_df.writeStream \
     .foreachBatch(process_batch) \
     .option("checkpointLocation", "hdfs://localhost:9000/checkpoints/main") \
     .start()
